@@ -1,0 +1,370 @@
+---
+title: "Folate Metabolism in CBFGLIS"
+author: "Jenny Smith"
+date: "3/25/21"
+output: html_document
+---
+
+# Set-up 
+
+```{r setup, cache = FALSE, include = FALSE}
+require(knitr)
+knitr::opts_knit$set(root.dir = file.path(PROJHOME,"2017.02.15_CBF-GLIS_DEG/2021.03.25_Folate_Metabolism"))
+```
+
+```{r}
+knitr::opts_chunk$set(tidy.opts=list(width.cutoff=50),
+                      tidy=TRUE,
+                      fig.align='center',
+                      fig.width = 10, fig.height = 10)
+
+node=Sys.info()[["nodename"]]
+if(!grepl("local", node)){
+  print(node)
+  options(bitmapType = 'cairo')
+  grDevices::X11.options(type='cairo')
+}
+
+options(stringsAsFactors = FALSE)
+table = function (..., useNA = 'ifany') base::table(..., useNA = useNA)
+```
+
+```{r message = FALSE, warning=FALSE}
+library(stringr)
+library(magrittr)
+
+library(ggplot2)
+library(gridExtra)
+
+library(dplyr)
+library(tidyr)
+library(tibble)
+
+
+library(DeGSEA)
+
+getwd()
+```
+
+
+# Raw Counts
+
+```{r}
+cts <- readRDS(file.path(PROJHOME, "0000.00.03_ExpressionMatrices/BCCA_GRCh37_Ensembl_v69/TARGET_AML_MPN_DS_NBM_3044Samples_Ribodepleted_RNAseq_geneLevel_dupGenesRemoved_FractionalCounts.RDS"))
+
+cts <- as.data.frame(cts)
+rownames(cts) <- cts$geneSymbol
+cts <- cts[,-c(1:2)]
+
+head(cts[,1:5])
+dim(cts) #51573  3044
+```
+
+```{r}
+TPM <- readRDS(file.path(PROJHOME, "0000.00.03_ExpressionMatrices/BCCA_GRCh37_Ensembl_v69/TARGET_AML_MPN_DS_NBM_3044Samples_Ribodepleted_RNAseq_geneLevel_dupGenesRemoved_TPM.RDS"))
+
+TPM <- as.data.frame(TPM)
+gene_ids <- TPM[,1:2]
+
+rownames(TPM) <- TPM$geneSymbol
+TPM <- TPM[,-c(1:2)]
+
+
+head(TPM[,1:5])
+dim(TPM)
+```
+
+```{r}
+# write.csv(gene_ids, "BCCA_GRCh37_Ensembl_v69_gene_IDs.csv", row.names = F)
+```
+
+
+# ClinData
+
+```{r}
+merged <- read.csv(file.path(CDE,"Merged/TARGET_AML_0531_1031_merged_CDEs_05.21.21.csv"))
+
+merged <- merged %>% 
+  filter(!is.na(USI), USI != "Unknown") %>% 
+  filter(Eligibility_Comments != "remove")
+
+
+dim(merged)
+```
+
+```{r}
+sample_info <- read.csv(file.path(TARGET, "SequencingDataMatrix/TARGET_AML_Ribodepleted_Manifest_08.12.21.csv"))
+
+
+dim(sample_info)
+```
+
+
+# Define Samples
+
+```{r}
+samps <- sample_info %>% 
+  filter(grepl("NBM|CD34|diagnostic", Time_point)) %>% 
+  filter(!grepl("Adult|APL|DS|JMML|MPN|TMD", Group)) %>% 
+  filter(Sample %in% colnames(TPM), 
+         !grepl("_replicate", Sample)) %>%  
+  
+  
+  # mutate_at(vars(Time_point), ~case_when(
+  #   .=="FlowSorted" & grepl("09A|03A", Sample) ~ "diagnostic",
+  #   TRUE ~ .)) %>% 
+  
+  mutate(CBFGLIS_vsOtherAML=case_when(
+    AML_Subtype=="CBFA2T3-GLIS2" ~ "CBFGLIS",
+    grepl("AML|FlowSorted", Group) ~ "otherAML",
+    TRUE  ~ NA_character_ )) %>% 
+  
+  mutate(CBFGLIS_vsNBM=case_when(
+    AML_Subtype=="CBFA2T3-GLIS2" ~ "CBFGLIS",
+    grepl("AML|FlowSorted", Group) ~ NA_character_,
+    grepl("NBM", Group) ~ Group,
+    TRUE  ~ NA_character_ )) %>% 
+  
+  mutate(USI1=USI, 
+         USI=Sample)
+
+
+
+
+head(samps)
+# table(samps$Group)
+# table(samps$AML_Subtype)
+table(samps$CBFGLIS_vsOtherAML)
+table(samps$CBFGLIS_vsNBM)
+# samps %>% filter(Group=="FlowSorted")
+```
+
+
+
+# Folate Pathway 
+
+```{r}
+PCv12.gmt <- readRDS(file.path(PROJHOME,"0000.00.01_GSEA_geneSets_gmt/pathwayCommons/PathwayCommons12.All.hgnc.gmt.RDS"))
+
+
+length(PCv12.gmt) #3971
+```
+
+```{r}
+folate_paths <- PCv12.gmt[grep("folate", names(PCv12.gmt), ignore.case = T)]
+
+
+length(folate_paths) #18 pathways
+# DeGSEA::write.gmt(list_of_genesets = folate_paths, filename = "PathwayCommons12.FolatePaths.hgnc.gmt")
+```
+
+```{r}
+folate_genes <- unlist(folate_paths) %>% 
+  unique()
+
+#check for missing genes
+# table(folate_genes %in% rownames(cts))
+# folate_genes[!folate_genes %in% rownames(cts)]
+# gene_ids %>% 
+#   filter(gene_id=="ENSG00000178700") #DHFR2 by gene_id
+
+#change to alias thats in our dataset
+folate_genes <- gsub("^DHFR2$", "DHFRL1", folate_genes)
+
+
+folate_genes[order(folate_genes)]
+length(folate_genes) #53
+
+
+# Save the folate genes to a file
+# gene_ids %>% 
+#   filter(geneSymbol %in% folate_genes) %>% 
+#   write.csv(.,"BCCA_GRCh37_Ensembl_v69_Folate_Genes.csv", row.names = F)
+```
+
+```{r}
+#The file BCCA_GRCh37_Ensembl_v69_Folate_Genes_Anno.csv is from uploading the gene_ids into the BioMart webservice 
+
+folate_gene_desc <- read.csv("BCCA_GRCh37_Ensembl_v69_Folate_Genes_Anno.csv") %>% 
+  rename_at(vars(Gene.stable.ID, Gene.name, Chromosome.scaffold.name), ~c("gene_id","gene","Chromosome")) %>%
+  arrange(Chromosome, Karyotype.band) %>% 
+  dplyr::select(gene,Gene.description,  Chromosome, everything())
+
+head(folate_gene_desc)
+```
+
+```{r eval=FALSE}
+# https://www.pathwaycommons.org/pc2/formats
+# PCv12 <- read.gmt(file.path(PROJHOME,"0000.00.01_GSEA_geneSets_gmt/pathwayCommons/PathwayCommons12.All.hgnc.gmt"))
+PCv12 <- readLines(file.path(PROJHOME,"0000.00.01_GSEA_geneSets_gmt/pathwayCommons/PathwayCommons12.All.hgnc.gmt")) 
+
+
+path_names <- gsub("(http.+symbol).+", "\\1", PCv12) %>% 
+  str_split_fixed(.,pattern = "\t", n=2) %>% 
+  as.data.frame() %>%  
+  mutate(Name=paste0(V2, paste0("; URL: ",V1))) %>%
+  mutate(Name=gsub("name: ", "", Name)) %>% 
+  pull(Name)
+  
+  
+# head(path_names)
+
+PCv12.gmt <- lapply(PCv12, function(genes){
+  genes <- gsub("^http.+symbol", "", genes)
+  genes <- str_split(genes, pattern = "\t")[[1]]
+  genes <- genes[genes!=""]
+})
+names(PCv12.gmt) <- path_names
+
+
+
+head(PCv12.gmt)
+tail(PCv12.gmt)
+# saveRDS(PCv12.gmt, file.path(PROJHOME,"0000.00.01_GSEA_geneSets_gmt/pathwayCommons/PathwayCommons12.All.hgnc.gmt.RDS"))
+```
+ 
+
+  
+# Perform Differential Expression
+
+```{r eval=FALSE}
+df_vsOtherAML <- samps %>% 
+  filter(!is.na(CBFGLIS_vsOtherAML)) %>% 
+  set_rownames(.$Sample)
+
+
+CBFGLIS_vs_OtherAML <- twoGroups_DEGs(expnData = cts,
+                                      clinData = df_vsOtherAML, 
+                                      col = "CBFGLIS_vsOtherAML", 
+                                      ref = "otherAML", 
+                                      percent.cutoff = 0.025, 
+                                      GOI = folate_genes, 
+                                      anno = TRUE, 
+                                      SkipPlots = TRUE)
+
+```
+
+```{r}
+DEGs_vsOtherAML <- extract_DEGs(CBFGLIS_vs_OtherAML, anno = TRUE, geneLevel = T) %>% 
+  inner_join(., folate_gene_desc, by="gene") %>% 
+  dplyr::select(gene,gene_id=gene_id.x, Gene.description, Chromosome, Karyotype.band, everything(), -gene_id.y)
+
+# dim(DEGs_vsOtherAML) #12
+DEGs_vsOtherAML
+# write.csv(DEGs_vsOtherAML, "TARGET_AML_CBFGLIS_vs_OtherAML_Folate_Metabolism_Genes.csv", row.names = FALSE)
+```
+
+```{r}
+df_vsNBM <- samps %>% 
+  filter(!is.na(CBFGLIS_vsNBM)) %>% 
+  set_rownames(.$Sample)
+
+
+CBFGLIS_vs_NBM <- twoGroups_DEGs(expnData = cts,
+                                      clinData = df_vsNBM, 
+                                      col = "CBFGLIS_vsNBM", 
+                                      ref = "NBM", 
+                                      percent.cutoff = 0.025, 
+                                      GOI = folate_genes, 
+                                      anno = TRUE, 
+                                      SkipPlots = TRUE)
+
+```
+
+```{r}
+DEGs_vsNBM <- extract_DEGs(CBFGLIS_vs_NBM, anno = TRUE, geneLevel = TRUE) %>% 
+  inner_join(., folate_gene_desc, by="gene") %>% 
+  dplyr::select(gene,gene_id=gene_id.x, Gene.description, Chromosome, Karyotype.band, everything(), -gene_id.y)
+
+# dim(DEGs_vsNBM) # 9 36
+# DEGs_vsNBM
+# write.csv(DEGs_vsNBM, "TARGET_AML_CBFGLIS_vs_NBM_Folate_Metabolism_Genes.csv", row.names = FALSE)
+```
+
+
+# GSVA 
+
+```{r}
+#For R v.4.1 - need to source .Rprofile with the weird path fixes to load this library.
+library(GSVA)
+```
+
+```{r}
+gsva.res.all <- gsva(expr = as.matrix(TPM[,samps$Sample]),
+                 gset.idx.list = folate_paths,
+                 # annotation=,
+                 method="ssgsea",
+                 kcdf="Gaussian",
+                 parallel.sz=2, 
+                 mx.diff=TRUE,
+                 abs.ranking=FALSE, 
+                 tau=1,
+                 min.sz=5,
+                 max.sz=400,
+                 verbose=TRUE)
+
+
+# head(gsva.res.all[,1:5])
+dim(gsva.res.all) #10 gene-sets met the criteria
+# write.csv(gsva.res.all, "TARGET_AML_Folate_ssGSEA_associated_pathways.csv")
+```
+
+```{r}
+df_vsOtherAML <- samps %>% 
+  filter(!is.na(CBFGLIS_vsOtherAML)) %>% 
+  mutate_at(vars(CBFGLIS_vsOtherAML), ~factor(., levels=c("otherAML","CBFGLIS"))) %>% 
+  set_rownames(.$Sample)
+
+DE_CBFGLIS_vs_others <- gsva_DE(gsva_matrix = gsva.res.all[,df_vsOtherAML$Sample],
+                              clinData=df_vsOtherAML,
+                              col="CBFGLIS_vsOtherAML",
+                              p.value = 1)
+```
+
+```{r}
+# table(DE_CBFGLIS_vs_others$fit$design[,2])
+ssgesea_res_AML <- DE_CBFGLIS_vs_others$gene_sets %>% 
+  separate(GeneSet, into=c("GeneSet","Source", "Organism", "idtype", "Reference"), sep="; ") %>% 
+  select(GeneSet:logFC, P.Value, adj.P.Val) %>% 
+  filter(adj.P.Val < 0.05) %>% 
+  mutate(adj.P.Val=format(adj.P.Val,digits = 2)) 
+
+
+# ssgesea_res_AML
+# write.csv(ssgesea_res_AML,"TARGET_AML_CBFA2T3-GLIS2_vs_OtherAML_folate_metabolism_ssGSEA.csv", row.names = FALSE)
+```
+
+```{r}
+df_vsNBM <- samps %>% 
+  filter(!is.na(CBFGLIS_vsNBM)) %>% 
+  mutate_at(vars(CBFGLIS_vsNBM), ~factor(., levels=c("NBM","CBFGLIS"))) %>%
+  set_rownames(.$Sample)
+
+
+DE_CBFGLIS_vs_NBM <- gsva_DE(gsva_matrix = gsva.res.all[,df_vsNBM$Sample],
+                              clinData=df_vsNBM,
+                              col="CBFGLIS_vsNBM",
+                              p.value = 1)
+```
+
+```{r}
+# table(DE_CBFGLIS_vs_NBM$fit$design[,2])
+ssgesea_res_NBM <- DE_CBFGLIS_vs_NBM$gene_sets %>% 
+  separate(GeneSet, into=c("GeneSet","Source", "Organism", "idtype", "Reference"), sep="; ") %>% 
+  select(GeneSet:logFC, P.Value, adj.P.Val) %>% 
+  filter(adj.P.Val < 0.05) %>% 
+  mutate(adj.P.Val=format(adj.P.Val,digits = 2)) 
+
+
+
+# ssgesea_res_NBM
+# write.csv(ssgesea_res_NBM,"TARGET_AML_CBFA2T3-GLIS2_vs_NBM_folate_metabolism_ssGSEA.csv", row.names = FALSE)
+```
+
+
+#Session Information
+
+```{r}
+sessionInfo()
+```
+
